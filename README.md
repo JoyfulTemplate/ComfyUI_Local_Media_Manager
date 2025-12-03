@@ -12,6 +12,21 @@
 
 ## 🇬🇧 English
 
+### Changelog (2025-12-03)
+* **Integrated Lightweight Mask Editor**: Added a seamless, built-in mask editor without bloating the codebase.
+    * **Intuitive Controls**: Draw (Left Click), Erase (Shift + Left Click), Pan (Middle Click/Drag), and Smooth Zoom (Mouse Wheel).
+    * **Smart Auto-Masking**: Automatically generates a mask from the alpha channel when opening transparent images.
+    * **Enhanced UX**: Features "Negative" blend mode display for high visibility, a dynamic cursor that scales with zoom, and a real-time status bar (Resolution & Zoom %).
+    * **File Sync**: "Save" writes standard mask files to the `input` directory; "Clear" automatically deletes the mask file, keeping your folders clean.
+* **Smart Node Outputs**:
+    * **Intelligent RGB Conversion**: The `IMAGE` output now automatically detects and removes the alpha channel if the image is fully opaque, preventing errors with nodes that require RGB input.
+    * **Smart Path Fallback**: The `path` output now returns the current directory path when no file is selected, enabling folder-based workflows.
+    * **New Output**: Added a dedicated `MASK` output interface.
+* **Core Optimizations**:
+    * **Lighter Dependencies**: Replaced the heavy `moviepy` dependency with `opencv-python-headless` for faster and lighter video processing.
+    * **Robust Refreshing**: Updated `IS_CHANGED` logic to detect external file modifications and mask creations/deletions instantly.
+    * **Compatibility**: Improved prompt extraction logic (supporting Civitai formats) and standardized file paths for better cross-platform support.
+
 ### Changelog (2025-09-17)
 * **Full File Management**: Integrated complete file management capabilities. You can now **Move**, **Delete** (safely to trash), and **Rename** files directly from the UI.
 * **Major UI/UX Upgrade**:
@@ -163,6 +178,21 @@ Connect these nodes to the outputs of the `Local Media Manager` to process your 
 ---
 
 ## 🇨🇳 中文
+
+### 更新日志 (2025-12-04)
+* **内置轻量级遮罩编辑器**: 在保持插件轻便的同时，集成了一个功能完备的遮罩编辑器。
+    * **操作流畅**: 支持左键绘制、Shift+左键擦除、中键平移画布以及滚轮丝滑缩放。
+    * **智能初始化**: 打开带有透明通道的图片时，会自动识别透明区域并生成遮罩笔迹。
+    * **交互体验**: 采用“差值（Negative）”模式显示遮罩，确保在任何图片上都清晰可见；光标大小随缩放自动调整，右下角实时显示分辨率与缩放比例。
+    * **文件同步**: 遮罩保存为标准图像至 `input` 目录；点击“Clear”不仅清空画布，还会自动物理删除对应的遮罩文件，拒绝垃圾文件残留。
+* **智能节点输出**:
+    * **自动 RGB 转换**: `IMAGE` 输出接口现在会智能检测，如果图像完全不透明，自动丢弃 Alpha 通道转为 RGB 格式，避免后续节点报错。
+    * **路径智能回退**: 当未选择任何文件时，`path` 接口会自动输出当前浏览的文件夹路径，方便连接加载文件夹的节点。
+    * **新增接口**: 主节点新增了 `MASK` 输出接口。
+* **核心与性能优化**:
+    * **移除重型依赖**: 彻底移除了臃肿的 `moviepy` 库，改用 `opencv-python-headless` 处理视频缩略图，启动更快，体积更小。
+    * **灵敏刷新**: 重写了 `IS_CHANGED` 逻辑，现在能敏锐感知外部文件的修改以及遮罩文件的创建/删除，自动触发工作流刷新。
+    * **兼容性增强**: 增强了对复杂元数据（如 Civitai 格式）的提示词提取能力，并修复了跨平台路径分隔符问题。
 
 ### 更新日志 (2025-09-17)
 * **完整的文件管理功能**：集成了全面的文件管理能力。现在您可以直接在UI界面中**移动**、**删除**（安全移至回收站）和**重命名**文件。

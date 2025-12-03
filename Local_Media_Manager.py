@@ -16,6 +16,8 @@ import cv2
 import torchaudio
 import subprocess
 import re
+import base64
+import folder_paths
 
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
@@ -198,14 +200,34 @@ class LocalMediaManagerNode:
         m = hashlib.sha256()
         m.update(str(selection).encode())
         m.update(str(current_path).encode())
-
+        
         try:
             selections_list = json.loads(selection)
+            input_dir = folder_paths.get_input_directory()
+            
             for item in selections_list:
-                if 'path' in item and os.path.exists(item['path']):
-                    mtime = os.path.getmtime(item['path'])
+                path = item.get('path')
+                if path and os.path.exists(path):
+                    mtime = os.path.getmtime(path)
                     m.update(str(mtime).encode())
-        except:
+                    
+                    filename = os.path.basename(path)
+                    name, _ = os.path.splitext(filename)
+                    mask_filename = f"{name}_mask.png"
+                    
+                    input_mask_path = os.path.join(input_dir, mask_filename)
+                    if os.path.exists(input_mask_path):
+                        mask_mtime = os.path.getmtime(input_mask_path)
+                        m.update(str(mask_mtime).encode())
+                        m.update(str(input_mask_path).encode())
+                    
+                    original_mask_path = os.path.join(os.path.dirname(path), mask_filename)
+                    if os.path.exists(original_mask_path):
+                        mask_mtime = os.path.getmtime(original_mask_path)
+                        m.update(str(mask_mtime).encode())
+                        m.update(str(original_mask_path).encode())
+                    
+        except Exception:
             pass
 
         return m.hexdigest()
@@ -290,31 +312,58 @@ class LocalMediaManagerNode:
 
                 if image_tensors:
                     final_image_tensor = torch.cat(image_tensors, dim=0)
+                    if final_image_tensor.shape[-1] == 4:
+                        if torch.min(final_image_tensor[:, :, :, 3]) > 0.9999:
+                            final_image_tensor = final_image_tensor[:, :, :, :3]
         
         mask_tensor = None
         if final_image_tensor is not None and final_image_tensor.nelement() > 0:
             h, w = final_image_tensor.shape[1], final_image_tensor.shape[2]
-
+            
             if valid_image_paths and final_image_tensor.shape[0] == 1:
-                try:
-                    first_image_path = valid_image_paths[0]
-                    with Image.open(first_image_path) as img:
-                        if img.mode == 'RGBA':
-                            alpha = np.array(img.split()[-1]).astype(np.float32) / 255.0
-                            inverted_alpha = 1.0 - alpha
+                first_image_path = valid_image_paths[0]
+                
+                filename = os.path.basename(first_image_path)
+                name, _ = os.path.splitext(filename)
+                input_dir = folder_paths.get_input_directory()
+                
+                input_mask_path = os.path.join(input_dir, f"{name}_mask.png")
+                
+                original_dir_mask_path = os.path.join(os.path.dirname(first_image_path), f"{name}_mask.png")
+
+                mask_file_to_load = None
+                if os.path.exists(input_mask_path):
+                    mask_file_to_load = input_mask_path
+                elif os.path.exists(original_dir_mask_path):
+                    mask_file_to_load = original_dir_mask_path
+
+                if mask_file_to_load:
+                    try:
+                        with Image.open(mask_file_to_load) as mask_img:
+                            if mask_img.width != w or mask_img.height != h:
+                                mask_img = mask_img.resize((w, h), Image.NEAREST)
                             
-                            if inverted_alpha.shape[0] != h or inverted_alpha.shape[1] != w:
-                                mask_img = Image.fromarray((inverted_alpha * 255).astype(np.uint8))
-                                mask_img = mask_img.resize((w, h), Image.LANCZOS)
-                                inverted_alpha = np.array(mask_img).astype(np.float32) / 255.0
-                                
-                            mask_tensor = torch.from_numpy(inverted_alpha).unsqueeze(0)
-                        else:
-                             mask_tensor = torch.zeros(1, h, w, dtype=torch.float32)
-                except Exception as e:
-                    print(f"LMM: Could not generate mask from image alpha. Error: {e}")
-                    mask_tensor = torch.zeros(1, h, w, dtype=torch.float32)
-            else:
+                            if 'A' in mask_img.getbands():
+                                mask_data = mask_img.split()[-1]
+                            else:
+                                mask_data = mask_img.convert("L")
+                            
+                            mask_np = np.array(mask_data).astype(np.float32) / 255.0
+                            mask_tensor = torch.from_numpy(mask_np).unsqueeze(0)
+
+                    except Exception as e:
+                        print(f"LMM: Error loading mask file: {e}")
+
+                if mask_tensor is None:
+                    try:
+                        with Image.open(first_image_path) as img:
+                            if img.mode == 'RGBA':
+                                alpha = np.array(img.split()[-1]).astype(np.float32) / 255.0
+                                inverted_alpha = 1.0 - alpha
+                                mask_tensor = torch.from_numpy(inverted_alpha).unsqueeze(0)
+                    except: pass
+            
+            if mask_tensor is None:
                  mask_tensor = torch.zeros(final_image_tensor.shape[0], h, w, dtype=torch.float32)
 
         if final_image_tensor.nelement() == 0:
@@ -1247,6 +1296,107 @@ async def rename_file(request):
         return web.json_response({"status": "ok", "message": "File renamed successfully.", "new_path": new_path})
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500)    
+
+@prompt_server.routes.post("/local_image_gallery/save_mask")
+async def save_mask(request):
+    try:
+        data = await request.json()
+        image_path = data.get("image_path")
+        mask_data_base64 = data.get("mask_data")
+        
+        if not image_path or not mask_data_base64:
+            return web.json_response({"status": "error", "message": "Missing parameters"}, status=400)
+
+        filename = os.path.basename(image_path)
+        name, _ = os.path.splitext(filename)
+        input_dir = folder_paths.get_input_directory()
+        
+        mask_filename = f"{name}_mask.png"
+        mask_path = os.path.join(input_dir, mask_filename)
+        
+        img_data = base64.b64decode(mask_data_base64.split(',')[1])
+        with Image.open(io.BytesIO(img_data)) as img:
+            if 'A' in img.getbands():
+                mask_img = img.split()[-1]
+            else:
+                mask_img = img.convert("L")
+
+            extrema = mask_img.getextrema()
+            if extrema and extrema[1] == 0:
+                if os.path.exists(mask_path):
+                    os.remove(mask_path)
+                    print(f"LMM: Empty mask detected, deleted {mask_filename}")
+                else:
+                    print(f"LMM: Empty mask detected, nothing to save.")
+                
+                return web.json_response({"status": "ok", "message": "Empty mask, file cleared"})
+            
+            mask_img.save(mask_path, "PNG")
+            
+        return web.json_response({"status": "ok", "mask_path": mask_path})
+    except Exception as e:
+        print(f"LMM Error saving mask: {e}")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+    
+@prompt_server.routes.post("/local_image_gallery/delete_mask")
+async def delete_mask(request):
+    try:
+        data = await request.json()
+        image_path = data.get("image_path")
+        
+        if not image_path:
+            return web.json_response({"status": "error", "message": "Missing image_path"}, status=400)
+
+        filename = os.path.basename(image_path)
+        name, _ = os.path.splitext(filename)
+        input_dir = folder_paths.get_input_directory()
+        mask_filename = f"{name}_mask.png"
+        
+        deleted = False
+        
+        input_mask_path = os.path.join(input_dir, mask_filename)
+        if os.path.exists(input_mask_path):
+            os.remove(input_mask_path)
+            deleted = True
+            
+        original_dir_mask_path = os.path.join(os.path.dirname(image_path), mask_filename)
+        if os.path.exists(original_dir_mask_path):
+            os.remove(original_dir_mask_path)
+            deleted = True
+
+        if deleted:
+            return web.json_response({"status": "ok", "message": "Mask deleted"})
+        else:
+            return web.json_response({"status": "ok", "message": "No mask found to delete"})
+            
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+@prompt_server.routes.post("/local_image_gallery/get_mask_path")
+async def get_mask_path(request):
+    try:
+        data = await request.json()
+        image_path = data.get("image_path")
+        
+        if not image_path:
+            return web.json_response({"status": "error", "message": "Missing image_path"}, status=400)
+
+        filename = os.path.basename(image_path)
+        name, _ = os.path.splitext(filename)
+        input_dir = folder_paths.get_input_directory()
+        
+        input_mask_path = os.path.join(input_dir, f"{name}_mask.png")
+        if os.path.exists(input_mask_path):
+             return web.json_response({"status": "ok", "mask_path": input_mask_path})
+             
+        original_dir_mask_path = os.path.join(os.path.dirname(image_path), f"{name}_mask.png")
+        if os.path.exists(original_dir_mask_path):
+             return web.json_response({"status": "ok", "mask_path": original_dir_mask_path})
+
+        return web.json_response({"status": "ok", "mask_path": None})
+        
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
 
 NODE_CLASS_MAPPINGS = {
     "LocalMediaManagerNode": LocalMediaManagerNode,

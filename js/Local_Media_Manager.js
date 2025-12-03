@@ -165,11 +165,11 @@ app.registerExtension({
                             word-break: break-all;
                             user-select: none;
                             line-height: 1.4;
-                            max-height: 33.6px; /* 1.4 * 12px * 2 lines */
+                            max-height: 33.6px;
                             overflow: hidden;
                             text-overflow: ellipsis;
                             display: -webkit-box;
-                            -webkit-line-clamp: 2; /* Limit to a maximum of 2 lines */
+                            -webkit-line-clamp: 2;
                             -webkit-box-orient: vertical;
                         }
                         #${uniqueId} .lmm-video-card-overlay { position: absolute; top: 5px; left: 5px; width: 24px; height: 24px; opacity: 0.8; pointer-events: none; }
@@ -193,7 +193,7 @@ app.registerExtension({
                         #${uniqueId} .lmm-workflow-text-badge {
                             font-size: 10px;
                             font-weight: bold;
-                            color: #FFD700; /* Gold color */
+                            color: #FFD700;
                             background-color: rgba(0,0,0,0.4);
                             padding: 2px 5px;
                             border-radius: 4px;
@@ -268,6 +268,28 @@ app.registerExtension({
                         #${uniqueId} .lmm-batch-move-btn:not(:disabled):hover { background-color: #2980B9; }
                         #${uniqueId} .lmm-batch-select-all-btn:not(:disabled):hover { background-color: #2980B9; }
                         #${uniqueId} .lmm-gallery-placeholder { position: absolute; top: 10px; left: 10px; color: #666; }
+
+                        #${uniqueId} .lmm-mask-editor-btn { background-color: #2a2a2a; border: 1px solid #555; color: #eee; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+                        #${uniqueId} .lmm-mask-editor-btn:hover { background-color: #444; }
+
+                        .lmm-mask-editor-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 10005; display: none; flex-direction: column; align-items: center; justify-content: center; }
+                        .lmm-mask-editor-container { position: relative; background: #222; border: 1px solid #444; padding: 10px; border-radius: 8px; max-width: 90%; max-height: 90%; display: flex; flex-direction: column; }
+                        .lmm-mask-editor-toolbar { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; color: #ddd; }
+                        .lmm-mask-editor-canvas-wrapper { position: relative; overflow: auto; max-height: 80vh; border: 1px solid #333; cursor: crosshair; }
+                        .lmm-mask-editor-canvas-wrapper canvas { display: block; }
+                        .lmm-mask-editor-actions { margin-top: 10px; display: flex; justify-content: flex-end; gap: 10px; }
+                        .lmm-mask-editor-btn-primary { background: #236694; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; }
+                        .lmm-mask-editor-btn-secondary { background: #444; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; }
+                        .lmm-brush-cursor {
+                            position: absolute;
+                            border: 1px solid rgba(255, 255, 255, 0.9);
+                            box-shadow: 0 0 2px 1px rgba(0, 0, 0, 0.8);
+                            border-radius: 50%;
+                            pointer-events: none;
+                            z-index: 10003;
+                            transform: translate(-50%, -50%);
+                            display: none;
+                        }
                     </style>
                     <div class="lmm-container-wrapper">
                          <div class="lmm-controls lmm-top-bar">
@@ -310,6 +332,7 @@ app.registerExtension({
                             </div>
                             <label>Global:</label> <input type="checkbox" class="lmm-global-search">
                             <div style="margin-left: auto; display: flex; gap: 5px;">
+                                <button class="lmm-mask-editor-btn" title="Open Mask Editor for selected image">Mask Editor</button>
                                 <button class="lmm-batch-action-btn lmm-batch-select-all-btn" title="Select All Files in Current View">All</button>
                                 <button class="lmm-batch-action-btn lmm-batch-move-btn" title="Move Selected Files" disabled>➔ Move</button>
                                 <button class="lmm-batch-action-btn lmm-batch-delete-btn" title="Delete Selected Files" disabled>🗑️ Delete</button>
@@ -1584,6 +1607,367 @@ app.registerExtension({
                             });
                         }
                     } catch (e) { console.error("Unable to load saved paths:", e); }
+                };
+
+                const maskEditorBtn = controls.querySelector(".lmm-mask-editor-btn");
+                
+                let editorState = {
+                    zoom: 1,
+                    panX: 0,
+                    panY: 0,
+                    isPanning: false,
+                    panStartX: 0,
+                    panStartY: 0
+                };
+
+                if (!document.getElementById("lmm-simple-mask-editor")) {
+                    const editorHTML = `
+                        <div id="lmm-simple-mask-editor" class="lmm-mask-editor-overlay">
+                            <div class="lmm-mask-editor-container" style="display:flex; flex-direction:column; height:90vh; width:90vw; max-width:none; max-height:none;">
+                                <div class="lmm-mask-editor-toolbar" style="flex-shrink:0;">
+                                    <label>Brush Size:</label>
+                                    <input type="range" id="lmm-mask-brush-size" min="1" max="100" value="20">
+                                    <button id="lmm-mask-clear">Clear</button>
+                                    <button id="lmm-mask-invert">Invert</button>
+                                    <span style="font-size: 12px; color: #888; margin-left: auto;">
+                                        Left: Draw | Shift+Left: Erase | Middle: Pan | Wheel: Zoom
+                                    </span>
+                                </div>
+                                
+                                <div id="lmm-mask-viewport" class="lmm-mask-editor-canvas-wrapper" style="flex-grow:1; position: relative; overflow: hidden; background: #333; cursor: none;">
+                                    <div id="lmm-brush-cursor" class="lmm-brush-cursor"></div>
+                                    <div id="lmm-mask-content" style="position: absolute; top:0; left:0; transform-origin: 0 0;">
+                                        <img id="lmm-mask-bg-img" style="display: block; pointer-events: none; user-select: none;">
+                                        <canvas id="lmm-mask-canvas" style="position: absolute; top: 0; left: 0; mix-blend-mode: difference;"></canvas>
+                                    </div>
+                                </div>
+                                
+                                <div class="lmm-mask-editor-actions" style="flex-shrink:0;">
+                                    <div id="lmm-mask-info" style="position: absolute; bottom: 14px; left: 10px; color: #eee; background: rgba(0, 0, 0, 0.6); padding: 4px 8px; border-radius: 4px; font-size: 14px; pointer-events: none; user-select: none; z-index: 10002; font-family: monospace;">
+                                        0 x 0 | 100%
+                                    </div>
+                                    <button id="lmm-mask-cancel" class="lmm-mask-editor-btn-secondary">Cancel</button>
+                                    <button id="lmm-mask-save" class="lmm-mask-editor-btn-primary">Save Mask</button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    document.body.insertAdjacentHTML("beforeend", editorHTML);
+                }
+
+                const maskEditorOverlay = document.getElementById("lmm-simple-mask-editor");
+                const viewport = document.getElementById("lmm-mask-viewport");
+                const content = document.getElementById("lmm-mask-content");
+                const bgImg = document.getElementById("lmm-mask-bg-img");
+                const maskCanvas = document.getElementById("lmm-mask-canvas");
+                const maskCtx = maskCanvas.getContext("2d");
+                const brushCursor = document.getElementById("lmm-brush-cursor");
+                
+                let isDrawingMask = false;
+                let currentImagePathForMask = "";
+
+                const updateCursor = (e) => {
+                    if (!e) return;
+                    
+                    if (editorState.isPanning) {
+                        viewport.style.cursor = "grabbing";
+                        brushCursor.style.display = "none";
+                        return;
+                    }
+                    
+                    const rect = viewport.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const y = e.clientY - rect.top;
+                    
+                    if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+                        brushCursor.style.display = "none";
+                        return;
+                    }
+
+                    viewport.style.cursor = "none";
+                    brushCursor.style.display = "block";
+                    
+                    brushCursor.style.left = x + "px";
+                    brushCursor.style.top = y + "px";
+                    
+                    const rawSize = document.getElementById("lmm-mask-brush-size").value;
+                    const scaledSize = rawSize * editorState.zoom;
+                    brushCursor.style.width = scaledSize + "px";
+                    brushCursor.style.height = scaledSize + "px";
+                };
+
+                const updateTransform = () => {
+                    content.style.transform = `translate(${editorState.panX}px, ${editorState.panY}px) scale(${editorState.zoom})`;
+                };
+
+                const updateInfoDisplay = () => {
+                    const infoEl = document.getElementById("lmm-mask-info");
+                    if (infoEl) {
+                        const w = maskCanvas.width;
+                        const h = maskCanvas.height;
+                        const zoomPct = Math.round(editorState.zoom * 100);
+                        infoEl.textContent = `${w} x ${h}px | ${zoomPct}%`;
+                    }
+                };
+
+                maskEditorBtn.addEventListener("click", async () => {
+                    if (selection.length !== 1 || selection[0].type !== 'image') {
+                        alert("Please select exactly one image to edit its mask.");
+                        return;
+                    }
+                    
+                    currentImagePathForMask = selection[0].path;
+                    const timestamp = new Date().getTime();
+                    
+                    const img = new Image();
+                    img.onload = async () => {
+                        maskEditorOverlay.style.display = "flex";
+
+                        maskCanvas.width = img.width;
+                        maskCanvas.height = img.height;
+                        maskCanvas.style.width = img.width + "px";
+                        maskCanvas.style.height = img.height + "px";
+                        
+                        bgImg.src = img.src;
+
+                        const viewportW = viewport.clientWidth;
+                        const viewportH = viewport.clientHeight;
+                        const imgW = img.width;
+                        const imgH = img.height;
+                        
+                        let scale = Math.min(viewportW / imgW, viewportH / imgH) * 0.9;
+                        if (scale <= 0 || !isFinite(scale)) scale = 1;
+                        
+                        editorState.zoom = scale;
+                        editorState.panX = (viewportW - imgW * scale) / 2;
+                        editorState.panY = (viewportH - imgH * scale) / 2;
+                        
+                        updateTransform();
+                        updateInfoDisplay();
+
+                        try {
+                            const response = await api.fetchApi("/local_image_gallery/get_mask_path", {
+                                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image_path: currentImagePathForMask }),
+                            });
+                            const data = await response.json();
+                            
+                            if (data.status === 'ok' && data.mask_path) {
+                                const maskUrl = `/local_image_gallery/view?filepath=${encodeURIComponent(data.mask_path)}&t=${timestamp}`;
+                                const existingMask = new Image();
+                                existingMask.onload = () => {
+                                    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+                                    maskCtx.drawImage(existingMask, 0, 0, maskCanvas.width, maskCanvas.height);
+                                    
+                                    const imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+                                    const d = imageData.data;
+                                    for (let i = 0; i < d.length; i += 4) {
+                                        if (d[i] > 100) {
+                                            d[i] = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = 255;
+                                        } else {
+                                            d[i+3] = 0;
+                                        }
+                                    }
+                                    maskCtx.putImageData(imageData, 0, 0);
+                                };
+                                existingMask.src = maskUrl;
+                            } else {
+                                const tempCanvas = document.createElement('canvas');
+                                tempCanvas.width = img.width;
+                                tempCanvas.height = img.height;
+                                const tempCtx = tempCanvas.getContext('2d');
+                                tempCtx.drawImage(img, 0, 0);
+                                
+                                const originalData = tempCtx.getImageData(0, 0, img.width, img.height).data;
+                                
+                                const maskImageData = maskCtx.createImageData(maskCanvas.width, maskCanvas.height);
+                                const maskPixels = maskImageData.data;
+                                let hasAlpha = false;
+
+                                for (let i = 0; i < originalData.length; i += 4) {
+                                    const alpha = originalData[i + 3];
+                                    if (alpha < 250) {
+                                        maskPixels[i] = 255;
+                                        maskPixels[i + 1] = 255;
+                                        maskPixels[i + 2] = 255;
+                                        maskPixels[i + 3] = 255;
+                                        hasAlpha = true;
+                                    } else {
+                                        maskPixels[i + 3] = 0;
+                                    }
+                                }
+
+                                if (hasAlpha) {
+                                    maskCtx.putImageData(maskImageData, 0, 0);
+                                } else {
+                                    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+                                }
+                            }
+                        } catch (e) {
+                            console.error("Failed to check mask:", e);
+                            maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+                        }
+                        
+                    };
+                    img.src = `/local_image_gallery/view?filepath=${encodeURIComponent(currentImagePathForMask)}&t=${timestamp}`;
+                });
+
+                viewport.addEventListener("wheel", (e) => {
+                    e.preventDefault();
+                    
+                    const rect = viewport.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+                    
+                    const mouseXWorld = (mouseX - editorState.panX) / editorState.zoom;
+                    const mouseYWorld = (mouseY - editorState.panY) / editorState.zoom;
+                    
+                    const zoomSpeed = 0.1;
+                    const newZoom = e.deltaY < 0 ? editorState.zoom * (1 + zoomSpeed) : editorState.zoom / (1 + zoomSpeed);
+                    
+                    if (newZoom < 0.1 || newZoom > 20) return;
+                    
+                    editorState.zoom = newZoom;
+                    
+                    editorState.panX = mouseX - mouseXWorld * editorState.zoom;
+                    editorState.panY = mouseY - mouseYWorld * editorState.zoom;
+                    
+                    updateTransform();
+                    updateCursor(e);
+                    updateInfoDisplay();
+                });
+
+                viewport.addEventListener("mousedown", (e) => {
+                    if (e.button === 1) {
+                        e.preventDefault();
+                        editorState.isPanning = true;
+                        editorState.panStartX = e.clientX;
+                        editorState.panStartY = e.clientY;
+                        viewport.style.cursor = "grabbing";
+                    } else if (e.button === 0) {
+                        isDrawingMask = true;
+                        maskCtx.beginPath();
+                        drawMask(e);
+                    }
+                    updateCursor(e);
+                });
+
+                window.addEventListener("mousemove", (e) => {
+                    if (editorState.isPanning) {
+                        const dx = e.clientX - editorState.panStartX;
+                        const dy = e.clientY - editorState.panStartY;
+                        editorState.panX += dx;
+                        editorState.panY += dy;
+                        editorState.panStartX = e.clientX;
+                        editorState.panStartY = e.clientY;
+                        updateTransform();
+                    } else if (isDrawingMask) {
+                        drawMask(e);
+                    }
+
+                    if (e.target === viewport || viewport.contains(e.target)) {
+                        updateCursor(e);
+                    } else {
+                        brushCursor.style.display = "none";
+                    }
+                });
+
+                window.addEventListener("mouseup", () => {
+                    editorState.isPanning = false;
+                    isDrawingMask = false;
+                    maskCtx.beginPath();
+                    updateCursor({ clientX: window.lastX, clientY: window.lastY });
+                });
+                
+                viewport.addEventListener("contextmenu", (e) => e.preventDefault());
+
+                document.getElementById("lmm-mask-brush-size").addEventListener("input", (e) => {
+                    if (brushCursor.style.display === 'block') {
+                        const rawSize = e.target.value;
+                        const scaledSize = rawSize * editorState.zoom;
+                        brushCursor.style.width = scaledSize + "px";
+                        brushCursor.style.height = scaledSize + "px";
+                    }
+                });
+
+                const getMousePos = (e) => {
+                    const rect = viewport.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+                    
+                    return {
+                        x: (mouseX - editorState.panX) / editorState.zoom,
+                        y: (mouseY - editorState.panY) / editorState.zoom
+                    };
+                };
+
+                const drawMask = (e) => {
+                    if (!isDrawingMask) return;
+                    e.preventDefault();
+                    
+                    if(e.target !== maskCanvas && e.target !== viewport && e.target !== content) return;
+
+                    const pos = getMousePos(e);
+                    const size = document.getElementById("lmm-mask-brush-size").value;
+                    
+                    maskCtx.lineWidth = size;
+                    maskCtx.lineCap = "round";
+                    maskCtx.lineJoin = "round";
+                    
+                    maskCtx.globalCompositeOperation = e.shiftKey ? "destination-out" : "source-over";
+                    
+                    maskCtx.strokeStyle = "white";
+                    maskCtx.fillStyle = "white";
+                    
+                    maskCtx.lineTo(pos.x, pos.y);
+                    maskCtx.stroke();
+                    
+                    maskCtx.beginPath();
+                    maskCtx.arc(pos.x, pos.y, size / 2, 0, Math.PI * 2);
+                    maskCtx.fill();
+                    
+                    maskCtx.beginPath();
+                    maskCtx.moveTo(pos.x, pos.y);
+                };
+
+                document.getElementById("lmm-mask-cancel").onclick = () => { maskEditorOverlay.style.display = "none"; };
+
+                document.getElementById("lmm-mask-clear").onclick = async () => {
+                    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+                    const clearBtn = document.getElementById("lmm-mask-clear");
+                    const originalText = clearBtn.textContent;
+                    clearBtn.textContent = "Deleting...";
+                    clearBtn.disabled = true;
+                    try {
+                        await api.fetchApi("/local_image_gallery/delete_mask", {
+                            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image_path: currentImagePathForMask }),
+                        });
+                        saveStateAndReload(true);
+                    } catch (e) { alert("Failed to delete: " + e); } finally { clearBtn.textContent = originalText; clearBtn.disabled = false; }
+                };
+                
+                document.getElementById("lmm-mask-invert").onclick = () => {
+                    const imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+                    const data = imageData.data;
+                    for (let i = 0; i < data.length; i += 4) {
+                        const currentAlpha = data[i + 3];
+                        if (currentAlpha < 100) { data[i + 3] = 255; } else { data[i + 3] = 0; }
+                        data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; 
+                    }
+                    maskCtx.putImageData(imageData, 0, 0);
+                };
+
+                document.getElementById("lmm-mask-save").onclick = async () => {
+                    const dataUrl = maskCanvas.toDataURL("image/png");
+                    const saveBtn = document.getElementById("lmm-mask-save");
+                    saveBtn.textContent = "Saving...";
+                    saveBtn.disabled = true;
+                    try {
+                        await api.fetchApi("/local_image_gallery/save_mask", {
+                            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image_path: currentImagePathForMask, mask_data: dataUrl }),
+                        });
+                        saveStateAndReload(true); 
+                        maskEditorOverlay.style.display = "none";
+                    } catch (e) { alert("Failed to save mask: " + e); } finally { saveBtn.textContent = "Save Mask"; saveBtn.disabled = false; }
                 };
                 
                 setTimeout(() => initializeNode.call(this), 1);
