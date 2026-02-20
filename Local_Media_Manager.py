@@ -246,6 +246,7 @@ class LocalMediaManagerNode:
 
     RETURN_TYPES = ("IMAGE", "MASK", "LMM_ALL_PATHS", "STRING", "STRING",)
     RETURN_NAMES = ("image", "mask", "paths", "path", "info",)
+    OUTPUT_IS_LIST = (True, True, False, False, True)
     FUNCTION = "get_selected_media"
     CATEGORY = "📜Asset Gallery/Local"
 
@@ -257,121 +258,85 @@ class LocalMediaManagerNode:
         
         image_paths = [item['path'] for item in selections_list if item.get('type') == 'image' and 'path' in item]
         
-        final_image_tensor = torch.zeros(1, 1, 1, 3)
-        info_strings = []
-        valid_image_paths = []
-        enriched_selection_list = []
+        images = []
+        masks = []
+        infos = []
 
         if image_paths:
-            sizes = {}
-            batch_has_alpha = False
-            
             for media_path in image_paths:
                 if os.path.exists(media_path):
                     try:
                         with Image.open(media_path) as img:
-                            sizes[img.size] = sizes.get(img.size, 0) + 1
-                            valid_image_paths.append(media_path)
-                            if not batch_has_alpha and (img.mode == 'RGBA' or (img.mode == 'P' and 'transparency' in img.info)):
-                                batch_has_alpha = True
-                    except Exception as e:
-                        print(f"LMM: Error reading size for {media_path}: {e}")
-
-            if valid_image_paths:
-                dominant_size = max(sizes.items(), key=lambda x: x[1])[0]
-                target_width, target_height = dominant_size
-                
-                target_mode = "RGBA" if batch_has_alpha else "RGB"
-                image_tensors = []
-
-                for media_path in valid_image_paths:
-                    try:
-                        with Image.open(media_path) as img:
-                            img_out = img.convert(target_mode)
+                            has_alpha = img.mode == 'RGBA' or (img.mode == 'P' and 'transparency' in img.info)
+                            img_out = img.convert("RGBA" if has_alpha else "RGB")
                             
-                            if img.size[0] != target_width or img.size[1] != target_height:
-                                img_array_pre = np.array(img_out).astype(np.float32) / 255.0
-                                tensor_pre = torch.from_numpy(img_array_pre)[None,].permute(0, 3, 1, 2)
-                                tensor_post = common_upscale(tensor_pre, target_width, target_height, "lanczos", "center")
-                                img_array = tensor_post.permute(0, 2, 3, 1).cpu().numpy().squeeze(0)
-                            else:
-                                img_array = np.array(img_out).astype(np.float32) / 255.0
-                            
+                            img_array = np.array(img_out).astype(np.float32) / 255.0
                             image_tensor = torch.from_numpy(img_array)[None,]
-                            image_tensors.append(image_tensor)
+                            
+                            # Handle Mask
+                            mask_tensor = None
+                            
+                            filename = os.path.basename(media_path)
+                            name, _ = os.path.splitext(filename)
+                            input_dir = folder_paths.get_input_directory()
+                            
+                            input_mask_path = os.path.join(input_dir, f"{name}_mask.png")
+                            original_dir_mask_path = os.path.join(os.path.dirname(media_path), f"{name}_mask.png")
 
-                            full_info = {"filename": os.path.basename(media_path), "width": img.width, "height": img.height, "mode": img.mode, "format": img.format}
+                            mask_file_to_load = None
+                            if os.path.exists(input_mask_path):
+                                mask_file_to_load = input_mask_path
+                            elif os.path.exists(original_dir_mask_path):
+                                mask_file_to_load = original_dir_mask_path
+
+                            if mask_file_to_load:
+                                try:
+                                    with Image.open(mask_file_to_load) as mask_img:
+                                        if mask_img.width != img.width or mask_img.height != img.height:
+                                            mask_img = mask_img.resize((img.width, img.height), Image.NEAREST)
+                                        
+                                        if 'A' in mask_img.getbands():
+                                            mask_data = mask_img.split()[-1]
+                                        else:
+                                            mask_data = mask_img.convert("L")
+                                        
+                                        mask_np = np.array(mask_data).astype(np.float32) / 255.0
+                                        mask_tensor = torch.from_numpy(mask_np).unsqueeze(0)
+                                except Exception: pass
+
+                            if mask_tensor is None:
+                                if image_tensor.shape[-1] == 4:
+                                    alpha = image_tensor[0, :, :, 3]
+                                    mask_tensor = (1.0 - alpha).unsqueeze(0)
+                            
+                            if mask_tensor is None:
+                                 mask_tensor = torch.zeros(1, img.height, img.width, dtype=torch.float32)
+
+                            if image_tensor.shape[-1] == 4:
+                                if torch.min(image_tensor[:, :, :, 3]) > 0.9999:
+                                    image_tensor = image_tensor[:, :, :, :3]
+
+                            images.append(image_tensor)
+                            masks.append(mask_tensor)
+
+                            full_info = {"filename": filename, "width": img.width, "height": img.height, "mode": img.mode, "format": img.format}
                             metadata = {}
                             if 'parameters' in img.info: metadata['parameters'] = img.info['parameters']
                             if 'prompt' in img.info: metadata['prompt'] = img.info['prompt']
                             if 'workflow' in img.info: metadata['workflow'] = img.info['workflow']
                             if metadata: full_info['metadata'] = metadata
-                            info_strings.append(json.dumps(full_info, ensure_ascii=False))
+                            
+                            infos.append(json.dumps(full_info, ensure_ascii=False))
+
                     except Exception as e:
                         print(f"LMM: Error processing image {media_path}: {e}")
 
-                if image_tensors:
-                    final_image_tensor = torch.cat(image_tensors, dim=0)
-                    if final_image_tensor.shape[-1] == 4:
-                        if torch.min(final_image_tensor[:, :, :, 3]) > 0.9999:
-                            final_image_tensor = final_image_tensor[:, :, :, :3]
-        
-        mask_tensor = None
-        if final_image_tensor is not None and final_image_tensor.nelement() > 0:
-            h, w = final_image_tensor.shape[1], final_image_tensor.shape[2]
-            
-            if valid_image_paths and final_image_tensor.shape[0] == 1:
-                first_image_path = valid_image_paths[0]
-                
-                filename = os.path.basename(first_image_path)
-                name, _ = os.path.splitext(filename)
-                input_dir = folder_paths.get_input_directory()
-                
-                input_mask_path = os.path.join(input_dir, f"{name}_mask.png")
-                
-                original_dir_mask_path = os.path.join(os.path.dirname(first_image_path), f"{name}_mask.png")
+        if not images:
+             images = [torch.zeros(1, 64, 64, 3)]
+             masks = [torch.zeros(1, 64, 64)]
+             infos = ["{}"]
 
-                mask_file_to_load = None
-                if os.path.exists(input_mask_path):
-                    mask_file_to_load = input_mask_path
-                elif os.path.exists(original_dir_mask_path):
-                    mask_file_to_load = original_dir_mask_path
-
-                if mask_file_to_load:
-                    try:
-                        with Image.open(mask_file_to_load) as mask_img:
-                            if mask_img.width != w or mask_img.height != h:
-                                mask_img = mask_img.resize((w, h), Image.NEAREST)
-                            
-                            if 'A' in mask_img.getbands():
-                                mask_data = mask_img.split()[-1]
-                            else:
-                                mask_data = mask_img.convert("L")
-                            
-                            mask_np = np.array(mask_data).astype(np.float32) / 255.0
-                            mask_tensor = torch.from_numpy(mask_np).unsqueeze(0)
-
-                    except Exception as e:
-                        print(f"LMM: Error loading mask file: {e}")
-
-                if mask_tensor is None:
-                    try:
-                        with Image.open(first_image_path) as img:
-                            if img.mode == 'RGBA':
-                                alpha = np.array(img.split()[-1]).astype(np.float32) / 255.0
-                                inverted_alpha = 1.0 - alpha
-                                mask_tensor = torch.from_numpy(inverted_alpha).unsqueeze(0)
-                    except: pass
-            
-            if mask_tensor is None:
-                 mask_tensor = torch.zeros(final_image_tensor.shape[0], h, w, dtype=torch.float32)
-
-        if final_image_tensor.nelement() == 0:
-             final_image_tensor = torch.zeros(1, 64, 64, 3)
-             mask_tensor = torch.zeros(1, 64, 64)
-        elif mask_tensor is None:
-             mask_tensor = torch.zeros(final_image_tensor.shape[0], final_image_tensor.shape[1], final_image_tensor.shape[2], dtype=torch.float32)
-
+        enriched_selection_list = []
         for item in selections_list:
             enriched_item = item.copy()
             if item.get('type') == 'image' and 'path' in item and os.path.exists(item['path']):
@@ -386,30 +351,13 @@ class LocalMediaManagerNode:
                     enriched_item['metadata'] = {}
             enriched_selection_list.append(enriched_item)
 
-        info_string_out = json.dumps(info_strings, indent=4, ensure_ascii=False)
-        if len(info_strings) == 1:
-            try:
-                single_info = json.loads(info_strings[0])
-                workflow_data_str = single_info.get("metadata", {}).get("workflow")
-                if workflow_data_str:
-                    try:
-                        workflow_json = json.loads(workflow_data_str)
-                        info_string_out = json.dumps(workflow_json, indent=4, ensure_ascii=False)
-                    except:
-                        info_string_out = workflow_data_str
-            except Exception as e:
-                print(f"LMM: Could not parse workflow info, falling back to default. Error: {e}")
-                pass
-        
         full_selection_json_string = json.dumps(enriched_selection_list, ensure_ascii=False)
 
         single_path_out = ""
-
         if len(selections_list) == 1:
             item = selections_list[0]
             if 'path' in item and os.path.exists(item['path']):
                 single_path_out = item['path']
-
         elif len(selections_list) == 0:
             if current_path and os.path.isdir(current_path):
                 single_path_out = current_path
@@ -423,8 +371,20 @@ class LocalMediaManagerNode:
                             single_path_out = saved_path
                 except Exception:
                     pass
+        
+        if len(infos) == 1:
+            try:
+                single_info = json.loads(infos[0])
+                workflow_data_str = single_info.get("metadata", {}).get("workflow")
+                if workflow_data_str:
+                    try:
+                        workflow_json = json.loads(workflow_data_str)
+                        infos[0] = json.dumps(workflow_json, indent=4, ensure_ascii=False)
+                    except:
+                        infos[0] = workflow_data_str
+            except: pass
 
-        return (final_image_tensor, mask_tensor, full_selection_json_string, single_path_out, info_string_out,)
+        return (images, masks, full_selection_json_string, single_path_out, infos,)
 
 def parse_selection_and_get_item(selection_json_str: str, index: int, expected_type: str = None):
     try:
